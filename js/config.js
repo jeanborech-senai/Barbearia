@@ -14,7 +14,7 @@ const CONFIG = {
   // Passo 4: Compartilhe sua agenda do Google com acesso público de leitura
   // Passo 5: Cole os valores abaixo
   googleApiKey: "AIzaSyCEF1zfcx0qDj36aioeK4khyN31FRotF80",
-  calendarId: "068ef95c195b11554bee2c903600064b889e0c3fdaceb63764b6381ba6049940@group.calendar.google.com", // ex: seuemail@gmail.com ou ID da agenda
+  calendarId: "jeanmiguelborech@gmail.com", // ex: seuemail@gmail.com ou ID da agenda
   appsScriptUrl: "https://script.google.com/macros/s/AKfycbyctSjXE1pfcJjifmNM5JE_2HOQqF93p1Frx6akmCVpgD-36RM7wmRsq5vCov-1nO7E/exec",
   // --- JANELAS DE HORÁRIO ---
   // Formato: { diaSemana: [[horaInicio, horaFim], ...] }
