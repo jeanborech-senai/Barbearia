@@ -315,6 +315,14 @@ body {
   text-decoration: line-through;
 }
 
+.slot-past {
+  background: #1a1a1a;
+  border-color: #222;
+  color: #2e2e2e;
+  cursor: not-allowed;
+  font-style: italic;
+}
+
 .slots-loading {
   display: flex;
   align-items: center;
