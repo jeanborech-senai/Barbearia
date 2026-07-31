@@ -233,17 +233,34 @@ function renderSlots(date) {
     return;
   }
 
+  const now = new Date();
+  const isToday = date.toDateString() === now.toDateString();
+
   slots.forEach(({ hour, minute }) => {
-    const busy = isSlotBusy(date, hour, minute);
     const label = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 
+    // Verifica se o horário já passou (só relevante no dia de hoje)
+    const slotDateTime = new Date(date);
+    slotDateTime.setHours(hour, minute, 0, 0);
+    const isPast = isToday && slotDateTime <= now;
+
+    const busy = isPast || isSlotBusy(date, hour, minute);
+
     const btn = document.createElement("button");
-    btn.className = `slot ${busy ? "slot-busy" : "slot-free"}`;
     btn.textContent = label;
     btn.disabled = busy;
-    btn.setAttribute("aria-label", busy ? `${label} - Ocupado` : `${label} - Disponível`);
 
-    if (!busy) {
+    if (isPast) {
+      btn.className = "slot slot-past";
+      btn.setAttribute("aria-label", `${label} - Horário passado`);
+      btn.title = "Horário já passou";
+    } else if (busy) {
+      btn.className = "slot slot-busy";
+      btn.setAttribute("aria-label", `${label} - Ocupado`);
+      btn.title = "Horário já reservado";
+    } else {
+      btn.className = "slot slot-free";
+      btn.setAttribute("aria-label", `${label} - Disponível`);
       btn.addEventListener("click", () => openBookingModal(date, hour, minute));
     }
 
@@ -331,8 +348,23 @@ async function confirmBooking() {
     feedback.textContent =
       "⚠️ Este horário acabou de ser ocupado por outra pessoa. Escolha outro horário.";
     feedback.className = "feedback-error";
-    // Atualiza slots para refletir o conflito
     await fetchBusySlots(pendingSlot.date);
+    renderSlots(pendingSlot.date);
+    return;
+  }
+
+  if (success === "unconfirmed") {
+    // Evento provavelmente foi criado mas Google demorou para refletir
+    const msg = encodeURIComponent(
+      `Olá! Fiz um agendamento pelo site mas quero confirmar:\n\n` +
+      `👤 Nome: ${name}\n` +
+      `📅 Data: ${dateLabel}\n` +
+      `🕐 Horário: ${timeLabel}\n\n` +
+      `Por favor, confirme se o horário está reservado. 🙏`
+    );
+    const wppUrl = `https://wa.me/${CONFIG.barbershopPhone}?text=${msg}`;
+    closeModal();
+    showSuccessScreen(name, dateLabel, timeLabel, wppUrl, true); // true = aviso de confirmação pendente
     renderSlots(pendingSlot.date);
     return;
   }
@@ -363,8 +395,10 @@ async function confirmBooking() {
 
 // =============================================
 // GOOGLE CALENDAR — CRIAÇÃO DE EVENTO
-// Estratégia: no-cors via GET (query params) para contornar preflight CORS
-// O Apps Script deve aceitar doGet com os parâmetros abaixo
+// Estratégia: GET + no-cors para contornar CORS do Apps Script.
+// Como não conseguimos ler a resposta (opaque), confirmamos
+// relendo o Calendar após a criação e verificando se o evento
+// realmente apareceu. Só mostra sucesso se confirmado.
 // =============================================
 
 async function createCalendarEvent(clientName, date, hour, minute) {
@@ -378,22 +412,23 @@ async function createCalendarEvent(clientName, date, hour, minute) {
   const endDateTime = new Date(startDateTime.getTime() + CONFIG.slotDuration * 60 * 1000);
 
   // -------------------------------------------------------
-  // VERIFICAÇÃO DUPLA: checar conflito antes de criar
-  // (garante que dois clientes simultâneos não colidam)
+  // PASSO 1 — Re-lê o Calendar agora para ter estado fresco
   // -------------------------------------------------------
   await fetchBusySlots(date);
+
   if (isSlotBusy(date, hour, minute)) {
-    console.warn("[Barbearia] Conflito detectado na verificação final.");
-    return "conflict"; // sinal especial para mostrar mensagem adequada
+    console.warn("[Barbearia] Conflito detectado antes de criar.");
+    return "conflict";
   }
 
   // -------------------------------------------------------
-  // ENVIO VIA GET + no-cors
-  // Google Apps Script não suporta preflight OPTIONS,
-  // então usamos GET com query string e mode: 'no-cors'.
-  // Com no-cors não conseguimos ler a resposta (opaque),
-  // mas o evento É criado no Calendar. Confirmamos relendo
-  // os eventos logo após.
+  // PASSO 2 — Conta quantos eventos existem ANTES da criação
+  // para comparar depois e confirmar que um novo foi criado
+  // -------------------------------------------------------
+  const countBefore = state.busySlots.length;
+
+  // -------------------------------------------------------
+  // PASSO 3 — Envia via GET + no-cors (sem preflight)
   // -------------------------------------------------------
   const url = new URL(CONFIG.appsScriptUrl);
   url.searchParams.set("action", "create");
@@ -404,41 +439,68 @@ async function createCalendarEvent(clientName, date, hour, minute) {
   try {
     await fetch(url.toString(), {
       method: "GET",
-      mode: "no-cors", // evita o preflight OPTIONS que o Apps Script rejeita
+      mode: "no-cors",
     });
   } catch (err) {
-    // Com no-cors erros de rede real ainda aparecem
     console.error("[Apps Script] Erro de rede:", err);
     return false;
   }
 
   // -------------------------------------------------------
-  // CONFIRMAÇÃO: aguarda ~1,5s e relê o Calendar para
-  // verificar se o evento apareceu (evita falso positivo)
+  // PASSO 4 — Tenta confirmar relendo o Calendar (até 3x)
+  // O Google Calendar pode demorar 1-3s para refletir
   // -------------------------------------------------------
-  await new Promise((r) => setTimeout(r, 1500));
-  await fetchBusySlots(date);
+  for (let tentativa = 1; tentativa <= 3; tentativa++) {
+    await new Promise((r) => setTimeout(r, 1500));
+    await fetchBusySlots(date);
 
-  const confirmed = isSlotBusy(date, hour, minute);
-  if (!confirmed) {
-    // Evento ainda não apareceu — adiciona localmente para
-    // não deixar o cliente em branco (o evento existe no Calendar)
-    state.busySlots.push({ start: startDateTime, end: endDateTime });
+    if (isSlotBusy(date, hour, minute)) {
+      // Evento confirmado no Calendar ✅
+      return true;
+    }
+
+    console.log(`[Barbearia] Aguardando confirmação... tentativa ${tentativa}/3`);
   }
 
-  return true; // chegou aqui = fetch não falhou = evento foi criado
+  // -------------------------------------------------------
+  // PASSO 5 — Após 3 tentativas, não apareceu no Calendar.
+  // Pode ser latência alta do Google ou o Apps Script falhou.
+  // Adiciona localmente para não bloquear o usuário, mas
+  // retorna "unconfirmed" para mostrar aviso adequado.
+  // -------------------------------------------------------
+  console.warn("[Barbearia] Evento não confirmado após 3 tentativas. Adicionando localmente.");
+  state.busySlots.push({ start: startDateTime, end: endDateTime });
+  return "unconfirmed";
 }
 
 // =============================================
 // TELA DE SUCESSO
 // =============================================
 
-function showSuccessScreen(name, dateLabel, timeLabel, wppUrl) {
+function showSuccessScreen(name, dateLabel, timeLabel, wppUrl, pendingConfirm = false) {
   const overlay = document.getElementById("success-overlay");
   document.getElementById("success-name").textContent = name;
   document.getElementById("success-date").textContent = dateLabel;
   document.getElementById("success-time").textContent = timeLabel;
   document.getElementById("success-wpp-link").href = wppUrl;
+
+  // Ajusta ícone e título conforme o status
+  const icon = document.getElementById("success-icon");
+  const heading = document.getElementById("success-heading");
+  const subtitle = document.getElementById("success-subtitle");
+  const wppBtn = document.getElementById("success-wpp-link");
+
+  if (pendingConfirm) {
+    icon.textContent = "⏳";
+    heading.textContent = "Aguardando confirmação";
+    subtitle.textContent = "Não conseguimos confirmar automaticamente. Envie uma mensagem para a barbearia verificar o horário.";
+    wppBtn.textContent = "✅  Confirmar pelo WhatsApp";
+  } else {
+    icon.textContent = "✅";
+    heading.textContent = "Agendado!";
+    subtitle.textContent = "Seu horário foi reservado com sucesso.";
+    wppBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="#fff"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg> Confirmar via WhatsApp`;
+  }
 
   overlay.classList.remove("hidden");
   overlay.classList.add("visible");
