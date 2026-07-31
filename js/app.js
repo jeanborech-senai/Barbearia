@@ -144,14 +144,11 @@ async function selectDate(date) {
 async function fetchBusySlots(date) {
   state.busySlots = [];
 
-  // Se a API key não foi configurada, avisa no console e continua sem bloqueios
   if (
     CONFIG.googleApiKey === "SUA_CHAVE_DE_API_AQUI" ||
     CONFIG.calendarId === "SEU_CALENDARIO_ID@gmail.com"
   ) {
-    console.warn(
-      "[Barbearia] Configure googleApiKey e calendarId em js/config.js para integrar com o Google Calendar."
-    );
+    console.warn("[Barbearia] Configure googleApiKey e calendarId em js/config.js.");
     return;
   }
 
@@ -168,7 +165,6 @@ async function fetchBusySlots(date) {
   url.searchParams.set("timeMax", end.toISOString());
   url.searchParams.set("singleEvents", "true");
   url.searchParams.set("orderBy", "startTime");
-  // Só busca campos necessários — sem acesso a dados pessoais dos agendamentos
   url.searchParams.set("fields", "items(start,end,status)");
 
   try {
@@ -179,12 +175,19 @@ async function fetchBusySlots(date) {
       return;
     }
     const data = await resp.json();
+
     state.busySlots = (data.items || [])
       .filter((e) => e.status !== "cancelled")
-      .map((e) => ({
-        start: new Date(e.start.dateTime || e.start.date),
-        end: new Date(e.end.dateTime || e.end.date),
-      }));
+      .map((e) => {
+        // dateTime vem em ISO com fuso (ex: "2025-08-05T10:00:00-03:00")
+        // date vem sem hora (eventos de dia inteiro)
+        const s = new Date(e.start.dateTime || e.start.date + "T00:00:00");
+        const en = new Date(e.end.dateTime   || e.end.date   + "T23:59:59");
+        console.log(`[Calendar] Evento: ${s.toLocaleTimeString()} – ${en.toLocaleTimeString()}`);
+        return { start: s, end: en };
+      });
+
+    console.log(`[Calendar] ${state.busySlots.length} evento(s) carregado(s) para ${date.toLocaleDateString()}`);
   } catch (err) {
     console.error("[Calendar API] Erro de rede:", err);
   }
@@ -218,9 +221,17 @@ function isSlotBusy(date, hour, minute) {
   slotStart.setHours(hour, minute, 0, 0);
   const slotEnd = new Date(slotStart.getTime() + CONFIG.slotDuration * 60 * 1000);
 
-  return state.busySlots.some(
-    (busy) => slotStart < busy.end && slotEnd > busy.start
+  const busy = state.busySlots.some((b) => slotStart < b.end && slotEnd > b.start);
+
+  console.log(
+    `[isSlotBusy] ${String(hour).padStart(2,"0")}:${String(minute).padStart(2,"0")}` +
+    ` → slotStart=${slotStart.toISOString()} | ocupado=${busy}` +
+    (state.busySlots.length
+      ? ` | eventos: ${state.busySlots.map(b => b.start.toLocaleTimeString() + "–" + b.end.toLocaleTimeString()).join(", ")}`
+      : " | nenhum evento")
   );
+
+  return busy;
 }
 
 function renderSlots(date) {
