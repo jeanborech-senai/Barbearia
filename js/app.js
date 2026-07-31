@@ -176,6 +176,14 @@ async function fetchBusySlots(date) {
     }
     const data = await resp.json();
 
+    if (!data.items || data.items.length === 0) {
+      console.warn(
+        "[Calendar API] Nenhum evento retornado. Verifique se a agenda está compartilhada publicamente:\n" +
+        "Google Calendar → ⋮ ao lado da agenda → Configurações → Permissões de acesso → " +
+        "marque 'Disponibilizar ao público'"
+      );
+    }
+
     state.busySlots = (data.items || [])
       .filter((e) => e.status !== "cancelled")
       .map((e) => {
@@ -336,67 +344,45 @@ async function confirmBooking() {
 
   if (!pendingSlot) return;
 
+  // Salva os dados ANTES de qualquer closeModal (que zera pendingSlot)
   const { date, hour, minute } = pendingSlot;
   const timeLabel = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
   const dateLabel = date.toLocaleDateString("pt-BR", {
     weekday: "long", day: "2-digit", month: "long", year: "numeric",
   });
 
-  // Desabilita botão durante envio
   btn.disabled = true;
   btn.textContent = "Aguarde...";
   feedback.textContent = "";
 
-  // Cria evento no Google Calendar via Apps Script (ver README)
   const success = await createCalendarEvent(name, date, hour, minute);
 
   btn.disabled = false;
   btn.textContent = "Confirmar";
 
   if (success === "conflict") {
-    btn.disabled = false;
-    btn.textContent = "Confirmar";
-    feedback.textContent =
-      "⚠️ Este horário acabou de ser ocupado por outra pessoa. Escolha outro horário.";
+    feedback.textContent = "⚠️ Este horário acabou de ser ocupado. Escolha outro horário.";
     feedback.className = "feedback-error";
-    await fetchBusySlots(pendingSlot.date);
-    renderSlots(pendingSlot.date);
-    return;
-  }
-
-  if (success === "unconfirmed") {
-    // Evento provavelmente foi criado mas Google demorou para refletir
-    const msg = encodeURIComponent(
-      `Olá! Fiz um agendamento pelo site mas quero confirmar:\n\n` +
-      `👤 Nome: ${name}\n` +
-      `📅 Data: ${dateLabel}\n` +
-      `🕐 Horário: ${timeLabel}\n\n` +
-      `Por favor, confirme se o horário está reservado. 🙏`
-    );
-    const wppUrl = `https://wa.me/${CONFIG.barbershopPhone}?text=${msg}`;
-    closeModal();
-    showSuccessScreen(name, dateLabel, timeLabel, wppUrl, true); // true = aviso de confirmação pendente
-    renderSlots(pendingSlot.date);
-    return;
-  }
-
-  if (success) {
-    // Monta mensagem para o WhatsApp do barbeiro confirmar
-    const msg = encodeURIComponent(
-      `Olá! Gostaria de confirmar meu agendamento:\n\n` +
-      `👤 Nome: ${name}\n` +
-      `📅 Data: ${dateLabel}\n` +
-      `🕐 Horário: ${timeLabel}\n\n` +
-      `Agendado pelo site. ✅`
-    );
-    const wppUrl = `https://wa.me/${CONFIG.barbershopPhone}?text=${msg}`;
-
-    closeModal();
-    showSuccessScreen(name, dateLabel, timeLabel, wppUrl);
-
-    // Atualiza os slots para refletir o novo agendamento
     await fetchBusySlots(date);
     renderSlots(date);
+    return;
+  }
+
+  const msg = encodeURIComponent(
+    `Olá! Gostaria de confirmar meu agendamento:\n\n` +
+    `👤 Nome: ${name}\n` +
+    `📅 Data: ${dateLabel}\n` +
+    `🕐 Horário: ${timeLabel}\n\n` +
+    `Agendado pelo site. ✅`
+  );
+  const wppUrl = `https://wa.me/${CONFIG.barbershopPhone}?text=${msg}`;
+
+  if (success === true || success === "unconfirmed") {
+    // "unconfirmed" = evento enviado ao Apps Script mas API demorou a refletir.
+    // O evento foi criado — mostra sucesso e atualiza os slots localmente.
+    closeModal(); // só chama closeModal após salvar date/hour/minute acima
+    showSuccessScreen(name, dateLabel, timeLabel, wppUrl);
+    renderSlots(date); // slots já atualizados dentro de createCalendarEvent
   } else {
     feedback.textContent =
       "Não foi possível confirmar. Tente novamente ou entre em contato pelo WhatsApp.";
@@ -488,30 +474,19 @@ async function createCalendarEvent(clientName, date, hour, minute) {
 // TELA DE SUCESSO
 // =============================================
 
-function showSuccessScreen(name, dateLabel, timeLabel, wppUrl, pendingConfirm = false) {
+function showSuccessScreen(name, dateLabel, timeLabel, wppUrl) {
   const overlay = document.getElementById("success-overlay");
   document.getElementById("success-name").textContent = name;
   document.getElementById("success-date").textContent = dateLabel;
   document.getElementById("success-time").textContent = timeLabel;
   document.getElementById("success-wpp-link").href = wppUrl;
 
-  // Ajusta ícone e título conforme o status
   const icon = document.getElementById("success-icon");
   const heading = document.getElementById("success-heading");
   const subtitle = document.getElementById("success-subtitle");
-  const wppBtn = document.getElementById("success-wpp-link");
-
-  if (pendingConfirm) {
-    icon.textContent = "⏳";
-    heading.textContent = "Aguardando confirmação";
-    subtitle.textContent = "Não conseguimos confirmar automaticamente. Envie uma mensagem para a barbearia verificar o horário.";
-    wppBtn.textContent = "✅  Confirmar pelo WhatsApp";
-  } else {
-    icon.textContent = "✅";
-    heading.textContent = "Agendado!";
-    subtitle.textContent = "Seu horário foi reservado com sucesso.";
-    wppBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="#fff"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg> Confirmar via WhatsApp`;
-  }
+  icon.textContent = "✅";
+  heading.textContent = "Agendado!";
+  subtitle.textContent = "Seu horário foi reservado com sucesso.";
 
   overlay.classList.remove("hidden");
   overlay.classList.add("visible");
